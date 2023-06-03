@@ -1,5 +1,10 @@
 import numpy as np
 import tensorflow as tf
+import os
+import pickle
+import gen_data
+
+os.makedirs('./saved_controller', exist_ok=True)
 
 
 # Define the lander model and its simulation function
@@ -72,9 +77,8 @@ class NeuralController:
         }
 
     def initialize_weights(self):
-        weights = {}
-        weights['W1'] = tf.Variable(tf.random.normal([self.input_dim, self.hidden_dim]))
-        weights['W2'] = tf.Variable(tf.random.normal([self.hidden_dim, self.output_dim]))
+        weights = {'W1': tf.Variable(tf.random.normal([self.input_dim, self.hidden_dim])),
+                   'W2': tf.Variable(tf.random.normal([self.hidden_dim, self.output_dim]))}
         return weights
 
     def forward(self, x):
@@ -98,11 +102,15 @@ class GeneticAlgorithm:
             population.append(controller)
         return population
 
-    def select_parents(self, fitness_scores):
-        fitness_probs = np.array(fitness_scores) / sum(fitness_scores)
-        parents = np.random.choice(range(self.population_size), size=2, replace=False, p=fitness_probs)
-        parent1_idx, parent2_idx = parents[0], parents[1]
-        return parent1_idx, parent2_idx
+    def tournament_selection(self, fitness_scores, tournament_size):
+        selected_parents = []
+        population_size = len(fitness_scores)
+        for _ in range(population_size):
+            tournament_indices = np.random.choice(range(population_size), size=tournament_size, replace=False)
+            tournament_fitness_scores = [fitness_scores[i] for i in tournament_indices]
+            winner_index = tournament_indices[np.argmax(tournament_fitness_scores)]
+            selected_parents.append(winner_index)
+        return selected_parents
 
     def crossover(self, parent1, parent2):
         child = NeuralController(self.input_dim, self.hidden_dim, self.output_dim)
@@ -120,8 +128,9 @@ class GeneticAlgorithm:
 
     def evolve_population(self, population, fitness_scores, mutation_rate):
         new_population = []
+        selected_parents = self.tournament_selection(fitness_scores, tournament_size=16)
         for _ in range(self.population_size):
-            parent1_idx, parent2_idx = self.select_parents(fitness_scores)
+            parent1_idx, parent2_idx = np.random.choice(selected_parents, size=2, replace=False)
             parent1 = population[parent1_idx]
             parent2 = population[parent2_idx]
             child = self.crossover(parent1, parent2)
@@ -132,21 +141,26 @@ class GeneticAlgorithm:
 
 def calculate_fitness(fitness, state):
     mp, x, v = state
-    # if x > 500:
-    #     fitness += 2005 - (abs(x) * 2 + abs(v))
-    # if x <= 500:
-    #     fitness += 1000 - (abs(x) + abs(v))
-    # if fitness <= 0 or (x < 100 and abs(v) > 10):
-    #     fitness = 1
-    # return fitness
-    distance_fitness = -abs(x)
-
-    # Velocity fitness
-    velocity_fitness = max(0, 10 - abs(v))
-
-    # Combine distance and velocity fitness
-    fitness = distance_fitness + velocity_fitness
+    wx = 1
+    wv = 2
+    wmp = 1
+    fitness = -wx * x + -wv * abs(v)
+    if x == 0 and abs(v) < 5:
+        fitness += 1000
+    if x == 0 and abs(v) > 30:
+        fitness = -20000
     return fitness
+
+
+def generate_tuples(fuel_min, fuel_max, fuel_step, position_min, position_max, position_step, velocity_min,
+                    velocity_max, velocity_step, list_of_tuples):
+    for k in range(5):
+        for i in range(fuel_min, fuel_max + 1, fuel_step):
+            for j in range(position_min, position_max + 1, position_step):
+                for z in range(velocity_min, velocity_max + 1, velocity_step):
+                    list_of_tuples.append((i, j, z))
+
+    return list_of_tuples
 
 
 def main():
@@ -164,57 +178,75 @@ def main():
     # Set up the genetic algorithm parameters
     population_size = 100
     input_dim = 3
-    hidden_dim = 7
+    hidden_dim = 14
     output_dim = 1
-    mutation_rate = 0.3
-    generations = 100
+    mutation_rate = 0.01
+    generations = 30
+    generation = 0
+
+    fuel_min = 200
+    fuel_max = 1300
+    fuel_step = 400
+    position_min = 200
+    position_max = 2000
+    position_step = 400
+    velocity_min = -50
+    velocity_max = 50
+    velocity_step = 10
+    list_of_tuples = []
 
     # Initialize the genetic algorithm
     genetic_algorithm = GeneticAlgorithm(population_size, input_dim, hidden_dim, output_dim)
     population = genetic_algorithm.initialize_population()
+    starting_parameters = generate_tuples(fuel_min, fuel_max, fuel_step, position_min, position_max, position_step,
+                                          velocity_min,
+                                          velocity_max, velocity_step, list_of_tuples)
 
-    for generation in range(generations):
+    for fuel, position, velocity in starting_parameters:
+        # for generation in range(generations):
         fitness_scores = []
         i = 0
         for controller in population:
-            state = [mp0, h0, v0]  # Initial state of the lander
+            state0 = [fuel, position, velocity]
+            state = state0  # Initial state of the lander
             fitness = 0
             i += 1
-            #print(f"Lander from: Generation = {generation}, Number =  {i}")
+            # print(f"Lander from: Generation = {generation}, Number =  {i}")
             for _ in range(100):  # Run simulation for 100 time steps
-                X = np.array(state)
-                X_normalized = (X - np.mean(X)) / np.std(X)  # Normalize input
-                X_normalized = np.expand_dims(X_normalized, axis=0)  # Add batch dimension
-                action = controller.forward(X_normalized).numpy()[0][0]
-                #F = Fmax if action > 0.5 else 0
-                state_norm = [(state[0] - mp0) / mp0, state[1] / h0, state[2] / g]
+                state_norm = [(state[0] - state0[0]) / state0[0], state[1] / state0[1], state[2] / g]
                 inputs = np.array([state_norm])
                 F = Fmax * tf.sigmoid(controller.forward(inputs)).numpy()[0][0]
                 state = lander.simulate(state, int(F))
                 fitness = calculate_fitness(fitness, state)
-                #print(f"Still going: Fuel Mass = {state[0]}, Position = {state[1]}, Velocity = {state[2]}, Fitness = {fitness}")
+                # print(
+                #     f"Still going: Generation = {generation}, Number =  {i}, Fuel Mass = {state[0]}, Position = {state[1]}, Velocity = {state[2]}, Fitness = {fitness}")
+                # if _ == 99:
+                    # print(
+                    #     f"Still going: Generation = {generation}, Number =  {i}, Fuel Mass = {state[0]}, Position = {state[1]}, Velocity = {state[2]}, Fitness = {fitness}")
                 if state[1] <= 0 or state[0] <= 0:
+                    # print(
+                    #     f"Still going: Generation = {generation}, Number =  {i}, Fuel Mass = {state[0]}, Position = {state[1]}, Velocity = {state[2]}, Fitness = {fitness}")
                     break  # Lander has landed or crashed, stop simulation
-            fitness_scores.append(fitness + 10000)
+            fitness_scores.append(fitness)
 
         best_fitness = max(fitness_scores)
         best_controller = population[fitness_scores.index(best_fitness)]
+        best_weights = best_controller.weights
+        file_path = f'./saved_controller/best_controller_generation_{generation}.pkl'
+        with open(file_path, 'wb') as f:
+            pickle.dump(best_weights, f)
         print(f"Generation {generation + 1}: Best Fitness = {best_fitness}")
-
-        if generation != generations - 1:
+        generation += 1
+        if generation != len(starting_parameters) - 1:
+        # if generation != generations - 1:
             population = genetic_algorithm.evolve_population(population, fitness_scores, mutation_rate)
 
     # Test the best controller
-    state = [mp0, h0, v0]  # Initial state of the lander
+    state = [900, 600, 10]  # Initial state of the lander
     for _ in range(300):  # Run simulation for 100 time steps
-        X = np.array(state)
-        X_normalized = (X - np.mean(X)) / np.std(X)  # Normalize input
-        X_normalized = np.expand_dims(X_normalized, axis=0)  # Add batch dimension
-        action = best_controller.forward(X_normalized).numpy()[0][0]
-        #F = Fmax if action > 0.5 else 0
-        state_norm = [(state[0] - mp0) / mp0, state[1] / 1000, state[2] / 40]
+        state_norm = [(state[0] - mp0) / mp0, state[1] / h0, state[2] / g]
         inputs = np.array([state_norm])
-        F = Fmax * tf.sigmoid(controller.forward(inputs)).numpy()[0][0]
+        F = Fmax * tf.sigmoid(best_controller.forward(inputs)).numpy()[0][0]
         state = lander.simulate(state, int(F))
         print(f"Still going: Fuel Mass = {state[0]}, Position = {state[1]}, Velocity = {state[2]}")
         if state[1] <= 0 or state[0] <= 0:
@@ -225,4 +257,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
